@@ -1,0 +1,6 @@
+# No external dependencies required
+# This game uses only Python standard library components:
+# - tkinter (GUI, included with Python)
+# - random (food spawning)
+# - dataclasses (game state management)
+# - typing (type hints)
