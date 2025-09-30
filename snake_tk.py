@@ -18,8 +18,47 @@ Key Features:
 
 import tkinter as tk
 from dataclasses import dataclass
-from random import randint
-from typing import List, Tuple, Optional, Set
+from random import randint, random
+from typing import List, Tuple, Optional, Set, Dict, Literal
+from enum import Enum, auto
+
+# Feature flags
+FEATURES = {
+    "score_tier_colors": True,
+    "moving_food": True,
+    "special_food": True,
+    "progressive_obstacles": True,
+    "bounded_grid": True,
+    "speed_scales_with_eats": True
+}
+
+# Game tuning parameters
+GAME_TUNING = {
+    "food_move_every_n_ticks": 6,
+    "special_spawn_chance": 0.22,        # 22% of spawns are special
+    "rotten_ratio_within_special": 0.35, # else golden
+    "min_snake_len": 1,
+    "obstacle_every_n_foods": 3,         # add new obstacle after every 3 fruits
+    "max_obstacles": 40,                 # cap for fairness
+    "speed_base": 150,                   # starting delay in ms (kept from original)
+    "speed_step_per_food": 2,            # decrease delay per fruit (kept from original)
+    "speed_min": 50,                     # minimum delay (max speed) (kept from original)
+    "score_tiers": [0, 5, 10, 20, 35, 50],
+    "tier_colors": ["#22c55e", "#3b82f6", "#a855f7", "#f59e0b", "#ef4444", "#eab308"]
+}
+
+# Food types
+class FoodType(Enum):
+    NORMAL = auto()
+    GOLDEN = auto()
+    ROTTEN = auto()
+
+# Food colors
+FOOD_COLORS = {
+    FoodType.NORMAL: "#E74C3C",  # Original red
+    FoodType.GOLDEN: "#f59e0b",  # Gold
+    FoodType.ROTTEN: "#8b5cf6"   # Purple
+}
 
 @dataclass
 class Point:
@@ -39,33 +78,55 @@ class Point:
     y: int  # Vertical position in the grid (0 = topmost, increases downward)
 
     def __eq__(self, other):
-        """
-        Compare two points for equality.
-        
-        Args:
-            other: Another Point object to compare with
-            
-        Returns:
-            bool: True if points have same coordinates, False otherwise
-            
-        This is used for collision detection (e.g., snake hitting itself
-        or eating food) and position comparison.
-        """
+        """Compare two points for equality."""
         if not isinstance(other, Point):
             return NotImplemented
         return self.x == other.x and self.y == other.y
 
     def __hash__(self):
-        """
-        Generate a hash value for the Point.
-        
-        Returns:
-            int: Hash value based on x and y coordinates
-            
-        This allows Point objects to be used in sets and as dictionary keys,
-        which is crucial for efficient collision detection using set operations.
-        """
+        """Generate a hash value for the Point."""
         return hash((self.x, self.y))
+    
+    def add(self, other: 'Point') -> 'Point':
+        """Add two points component-wise."""
+        return Point(self.x + other.x, self.y + other.y)
+    
+    def in_bounds(self, width: int, height: int) -> bool:
+        """Check if point is within grid bounds."""
+        return 0 <= self.x < width and 0 <= self.y < height
+
+@dataclass
+class Food:
+    """
+    Represents a food item in the game.
+    
+    Attributes:
+        pos (Point): Position on the grid
+        type (FoodType): Type of food (normal, golden, or rotten)
+        is_moving (bool): Whether this food can move
+    """
+    pos: Point
+    type: FoodType
+    is_moving: bool = True
+    
+    @property
+    def color(self) -> str:
+        """Get the color for this food type."""
+        return FOOD_COLORS[self.type]
+    
+    @property
+    def score_value(self) -> int:
+        """Get the score value for this food type."""
+        return {
+            FoodType.NORMAL: 1,
+            FoodType.GOLDEN: 3,
+            FoodType.ROTTEN: -1
+        }[self.type]
+    
+    @property
+    def growth_value(self) -> int:
+        """Get how much the snake should grow when eating this food."""
+        return self.score_value  # Same as score for simplicity
 
 
 class SnakeGame:
@@ -80,25 +141,27 @@ class SnakeGame:
     5. Controlling game flow (start, pause, game over)
     
     The game runs on a grid-based system where each cell can contain
-    either a snake segment, food, or nothing. The snake moves continuously
-    in the current direction until it hits itself or changes direction
-    via user input.
+    a snake segment, food, obstacle, or nothing. The snake moves continuously
+    until collision with wall, self, or obstacle.
     """
     
     # Color scheme using modern flat UI colors for visual appeal and clarity
     BG_COLOR = "#2C3E50"      # Dark blue-gray background - easy on the eyes
-    SNAKE_COLOR = "#2ECC71"    # Bright green snake body - stands out against background
-    SNAKE_HEAD_COLOR = "#27AE60"  # Darker green head - distinguishable from body
-    FOOD_COLOR = "#E74C3C"     # Red food - contrasts with snake and background
-    TEXT_COLOR = "#ECF0F1"     # Light gray text - readable on dark background
+    TEXT_COLOR = "#ECF0F1"    # Light gray text - readable on dark background
+    OBSTACLE_COLOR = "#475569" # Dark gray for obstacles
     
-    # Game configuration constants for customizable gameplay
-    CELL_SIZE = 20        # Size of each grid cell in pixels (20x20 px squares)
-    GRID_WIDTH = 30       # Number of cells horizontally (600px total width)
-    GRID_HEIGHT = 30      # Number of cells vertically (600px total height)
-    INITIAL_SPEED = 150   # Starting speed: 150ms delay between moves
-    SPEED_INCREASE = 2    # Decrease delay by 2ms per food eaten (faster)
-    MIN_SPEED = 50        # Fastest possible speed: 50ms delay (speed cap)
+    # Game configuration constants
+    CELL_SIZE = 20            # Size of each grid cell in pixels (20x20 px squares)
+    GRID_WIDTH = 30           # Number of cells horizontally (600px total width)
+    GRID_HEIGHT = 30          # Number of cells vertically (600px total height)
+    
+    # Movement vectors
+    DIRECTIONS = [
+        Point(1, 0),   # Right
+        Point(-1, 0),  # Left
+        Point(0, -1),  # Up
+        Point(0, 1)    # Down
+    ]
 
     def __init__(self):
         """
@@ -110,32 +173,76 @@ class SnakeGame:
         3. Sets up the user interface
         4. Binds keyboard controls
         5. Starts a new game
-        
-        The game starts with:
-        - Empty snake list (populated in reset_game)
-        - Initial direction set to right
-        - Score at 0
-        - Default game speed
-        - Game over flag cleared
         """
         # Create and configure main window with fixed size
         self.root = tk.Tk()
         self.root.title("Snake Game")
-        self.root.resizable(False, False)  # Prevent window resizing for consistent gameplay
+        self.root.resizable(False, False)  # Prevent window resizing
         
         # Initialize game state variables
         self.snake: List[Point] = []       # List of Points representing snake segments
         self.direction = Point(1, 0)       # Current movement direction (right)
-        self.next_direction = Point(1, 0)  # Buffered next direction (prevents multiple turns per frame)
-        self.food: Optional[Point] = None  # Current food position (None until first spawn)
+        self.next_direction = Point(1, 0)  # Buffered next direction
+        self.food: Optional[Food] = None   # Current food object
+        self.obstacles: Set[Point] = set() # Set of obstacle positions
         self.score = 0                     # Player's current score
-        self.game_speed = self.INITIAL_SPEED  # Current game update interval in milliseconds
-        self.game_over_flag = False        # Tracks if game is in "game over" state
+        self.foods_eaten = 0              # Counter for obstacle spawning
+        self.tick_count = 0               # Counter for food movement
+        self.game_speed = GAME_TUNING["speed_base"]  # Current update interval
+        self.game_over_flag = False       # Tracks if game is over
         
-        # Complete setup by calling helper methods
-        self.setup_ui()      # Create and configure UI elements
-        self.bind_keys()     # Set up keyboard controls
-        self.reset_game()    # Initialize game state for first play
+        # Complete setup
+        self.setup_ui()      # Create UI elements
+        self.bind_keys()     # Set up controls
+        self.reset_game()    # Start new game
+        
+    def snake_color_for_score(self) -> str:
+        """Get the snake color based on current score tier."""
+        if not FEATURES["score_tier_colors"]:
+            return "#2ECC71"  # Default green
+            
+        tiers = GAME_TUNING["score_tiers"]
+        colors = GAME_TUNING["tier_colors"]
+        
+        # Find the highest tier below or equal to current score
+        for tier, color in zip(reversed(tiers), reversed(colors)):
+            if self.score >= tier:
+                return color
+                
+        return colors[0]  # Fallback to first color
+        
+    def is_cell_free(self, pos: Point) -> bool:
+        """Check if a cell is available (no snake, food, or obstacle)."""
+        if not pos.in_bounds(self.GRID_WIDTH, self.GRID_HEIGHT):
+            return False
+        return (pos not in self.snake and 
+                (not self.food or pos != self.food.pos) and
+                pos not in self.obstacles)
+                
+    def bfs_reachable(self, start: Point, target: Point) -> bool:
+        """Check if target is reachable from start using BFS."""
+        if not FEATURES["progressive_obstacles"]:
+            return True
+            
+        visited = {start}
+        queue = [start]
+        
+        while queue:
+            current = queue.pop(0)
+            if current == target:
+                return True
+                
+            # Try all directions
+            for direction in self.DIRECTIONS:
+                next_pos = current.add(direction)
+                if (next_pos.in_bounds(self.GRID_WIDTH, self.GRID_HEIGHT) and
+                    next_pos not in visited and
+                    next_pos not in self.obstacles and
+                    next_pos not in self.snake[:-1]):  # Allow reaching tail
+                    visited.add(next_pos)
+                    queue.append(next_pos)
+                    
+        return False
 
     def setup_ui(self):
         """
@@ -285,320 +392,478 @@ class SnakeGame:
         """
         Spawn new food in a random empty cell.
         
-        This method ensures food is placed:
-        1. In a valid grid position (within bounds)
-        2. Not overlapping with snake body
-        3. Completely random among available cells
-        
-        Algorithm:
-        1. Get set of cells occupied by snake (O(n) time)
-        2. Generate random coordinates within grid
-        3. Check if position is empty (O(1) lookup)
-        4. Repeat 2-3 until valid position found
-        5. Place food at chosen position
-        
-        Note: While this could theoretically loop forever,
-        in practice it's very fast since:
-        - Snake typically occupies small % of grid
-        - Grid is 30x30 = 900 cells total
-        - Snake length is usually < 100 cells
+        Features:
+        1. Random position (not on snake/obstacles)
+        2. Special food types (normal, golden, rotten)
+        3. Moving food capability
         """
-        occupied = self.get_occupied_cells()  # Get current snake positions
+        # Determine food type
+        food_type = FoodType.NORMAL
+        if FEATURES["special_food"] and random() < GAME_TUNING["special_spawn_chance"]:
+            food_type = (FoodType.ROTTEN 
+                        if random() < GAME_TUNING["rotten_ratio_within_special"]
+                        else FoodType.GOLDEN)
         
-        while True:
-            # Generate random coordinates within grid bounds
-            food = Point(
-                randint(0, self.GRID_WIDTH - 1),   # Random x in [0, 29]
-                randint(0, self.GRID_HEIGHT - 1)   # Random y in [0, 29]
+        # Find empty position
+        attempts = 200  # Prevent infinite loop
+        while attempts > 0:
+            pos = Point(
+                randint(0, self.GRID_WIDTH - 1),
+                randint(0, self.GRID_HEIGHT - 1)
             )
-            # Place food if cell is empty (O(1) lookup in set)
-            if food not in occupied:
-                self.food = food
-                break
+            if self.is_cell_free(pos):
+                # Create food object
+                self.food = Food(
+                    pos=pos,
+                    type=food_type,
+                    is_moving=FEATURES["moving_food"]
+                )
+                return
+            attempts -= 1
+            
+        # If we get here, the grid is too full
+        self.game_over()
+        
+    def try_move_food(self):
+        """Attempt to move food if conditions are met."""
+        if (not FEATURES["moving_food"] or
+            not self.food or
+            not self.food.is_moving or
+            self.tick_count % GAME_TUNING["food_move_every_n_ticks"] != 0):
+            return
+            
+        # Try each direction randomly
+        directions = self.DIRECTIONS.copy()
+        while directions:
+            # Pick and remove a random direction
+            idx = randint(0, len(directions) - 1)
+            direction = directions.pop(idx)
+            
+            # Calculate new position
+            new_pos = self.food.pos.add(direction)
+            if self.is_cell_free(new_pos):
+                self.food.pos = new_pos
+                return
 
     def move_snake(self) -> bool:
         """
         Move snake one step in current direction.
         
-        This is the core game logic method that:
-        1. Updates snake direction (if valid turn)
-        2. Calculates new head position
-        3. Handles collisions and food eating
-        4. Updates score and speed
-        
-        Movement Rules:
-        - Snake moves one cell per game tick
-        - Wraps around grid edges (e.g., right edge → left edge)
-        - Can't reverse direction (180° turns blocked)
-        - Grows by one cell when eating food
-        
-        Collision Rules:
-        - Game over if snake hits itself
-        - Wrapping around edges is allowed
-        - Food collision = growth + score increase
-        
-        Speed Mechanics:
-        - Speed increases with each food eaten
-        - Caps at MIN_SPEED (50ms) for playability
-        - Each food reduces delay by SPEED_INCREASE (2ms)
+        Features:
+        1. Bounded grid (no wrapping)
+        2. Special food effects
+        3. Obstacle collisions
+        4. Progressive speed scaling
         
         Returns:
-            bool: True if move was successful, False if game over
+            bool: True if move successful, False if game over
         """
-        # Update direction if turn is valid (no 180° turns)
+        # Update direction if valid (no 180° turns)
         if (self.next_direction.x != -self.direction.x or 
             self.next_direction.y != -self.direction.y):
             self.direction = self.next_direction
 
-        # Calculate new head position with grid wrapping
+        # Calculate new head position
         head = self.snake[0]
-        new_head = Point(
-            (head.x + self.direction.x) % self.GRID_WIDTH,   # Wrap x coordinate
-            (head.y + self.direction.y) % self.GRID_HEIGHT   # Wrap y coordinate
-        )
+        new_head = head.add(self.direction)
+        
+        # Check bounds if bounded grid enabled
+        if FEATURES["bounded_grid"]:
+            if not new_head.in_bounds(self.GRID_WIDTH, self.GRID_HEIGHT):
+                return False  # Hit wall
+        else:
+            # Wrap around grid
+            new_head = Point(
+                new_head.x % self.GRID_WIDTH,
+                new_head.y % self.GRID_HEIGHT
+            )
 
-        # Check for collision with snake body (game over condition)
+        # Check collisions
         if new_head in self.snake:
-            return False  # Game over - snake hit itself
+            return False  # Hit self
+        if new_head in self.obstacles:
+            return False  # Hit obstacle
 
-        # Add new head to front of snake
+        # Add new head
         self.snake.insert(0, new_head)
         
-        # Handle food collision and snake growth
-        if new_head == self.food:
-            # Food eaten - increase score and speed
-            self.score += 1
+        # Handle food collision
+        if self.food and new_head == self.food.pos:
+            # Apply food effects
+            self.score = max(0, self.score + self.food.score_value)
             self.score_var.set(f"Score: {self.score}")
-            # Speed up game (decrease delay, minimum 50ms)
-            self.game_speed = max(
-                self.MIN_SPEED,
-                self.game_speed - self.SPEED_INCREASE
-            )
-            self.spawn_food()  # Generate new food
+            
+            # Handle growth/shrink
+            growth = self.food.growth_value
+            if growth < 0:
+                # Shrink snake (remove extra segments)
+                for _ in range(-growth):
+                    if len(self.snake) > GAME_TUNING["min_snake_len"]:
+                        self.snake.pop()
+            
+            # Speed up game if enabled
+            if FEATURES["speed_scales_with_eats"]:
+                self.game_speed = max(
+                    GAME_TUNING["speed_min"],
+                    self.game_speed - GAME_TUNING["speed_step_per_food"]
+                )
+            
+            # Track food eaten
+            self.foods_eaten += 1
+            
+            # Maybe spawn obstacle
+            if (FEATURES["progressive_obstacles"] and
+                self.foods_eaten % GAME_TUNING["obstacle_every_n_foods"] == 0):
+                self.try_spawn_obstacles(1)
+            
+            # Spawn new food
+            self.spawn_food()
         else:
-            self.snake.pop()  # No food - remove tail to maintain length
+            # No food - remove tail
+            self.snake.pop()
 
         return True  # Move successful
+        
+    def try_spawn_obstacles(self, count: int):
+        """
+        Spawn creative obstacle patterns.
+        
+        Patterns include:
+        - L-shapes
+        - Small squares
+        - Diagonal lines
+        - Zigzag patterns
+        - Single blocks
+        """
+        if len(self.obstacles) >= GAME_TUNING["max_obstacles"]:
+            return
+            
+        # Choose a random pattern based on score
+        patterns = [
+            self._spawn_l_shape,
+            self._spawn_small_square,
+            self._spawn_diagonal,
+            self._spawn_zigzag,
+            self._spawn_single_block
+        ]
+        
+        pattern_func = patterns[randint(0, len(patterns) - 1)]
+        pattern_func()
+        
+    def _spawn_l_shape(self):
+        """Spawn an L-shaped obstacle."""
+        attempts = 10
+        while attempts > 0:
+            # Try to place the base point of the L
+            base = Point(
+                randint(1, self.GRID_WIDTH - 3),
+                randint(1, self.GRID_HEIGHT - 3)
+            )
+            
+            # Define the L shape (3 blocks)
+            l_points = [
+                base,
+                Point(base.x + 1, base.y),
+                Point(base.x, base.y + 1)
+            ]
+            
+            # Check if all points are valid
+            if all(self.is_cell_free(p) for p in l_points):
+                # Verify snake can reach food
+                temp_obstacles = self.obstacles.copy()
+                temp_obstacles.update(l_points)
+                
+                if self._check_path_with_temp_obstacles(temp_obstacles):
+                    self.obstacles.update(l_points)
+                    return True
+            
+            attempts -= 1
+        return False
+        
+    def _spawn_small_square(self):
+        """Spawn a 2x2 square obstacle."""
+        attempts = 10
+        while attempts > 0:
+            base = Point(
+                randint(1, self.GRID_WIDTH - 3),
+                randint(1, self.GRID_HEIGHT - 3)
+            )
+            
+            square_points = [
+                base,
+                Point(base.x + 1, base.y),
+                Point(base.x, base.y + 1),
+                Point(base.x + 1, base.y + 1)
+            ]
+            
+            if all(self.is_cell_free(p) for p in square_points):
+                temp_obstacles = self.obstacles.copy()
+                temp_obstacles.update(square_points)
+                
+                if self._check_path_with_temp_obstacles(temp_obstacles):
+                    self.obstacles.update(square_points)
+                    return True
+                    
+            attempts -= 1
+        return False
+        
+    def _spawn_diagonal(self):
+        """Spawn a diagonal line of obstacles."""
+        attempts = 10
+        while attempts > 0:
+            base = Point(
+                randint(1, self.GRID_WIDTH - 4),
+                randint(1, self.GRID_HEIGHT - 4)
+            )
+            
+            diagonal_points = [
+                base,
+                Point(base.x + 1, base.y + 1),
+                Point(base.x + 2, base.y + 2)
+            ]
+            
+            if all(self.is_cell_free(p) for p in diagonal_points):
+                temp_obstacles = self.obstacles.copy()
+                temp_obstacles.update(diagonal_points)
+                
+                if self._check_path_with_temp_obstacles(temp_obstacles):
+                    self.obstacles.update(diagonal_points)
+                    return True
+                    
+            attempts -= 1
+        return False
+        
+    def _spawn_zigzag(self):
+        """Spawn a zigzag pattern."""
+        attempts = 10
+        while attempts > 0:
+            base = Point(
+                randint(1, self.GRID_WIDTH - 4),
+                randint(1, self.GRID_HEIGHT - 3)
+            )
+            
+            zigzag_points = [
+                base,
+                Point(base.x + 1, base.y),
+                Point(base.x + 1, base.y + 1),
+                Point(base.x + 2, base.y + 1)
+            ]
+            
+            if all(self.is_cell_free(p) for p in zigzag_points):
+                temp_obstacles = self.obstacles.copy()
+                temp_obstacles.update(zigzag_points)
+                
+                if self._check_path_with_temp_obstacles(temp_obstacles):
+                    self.obstacles.update(zigzag_points)
+                    return True
+                    
+            attempts -= 1
+        return False
+        
+    def _spawn_single_block(self):
+        """Spawn a single obstacle block."""
+        attempts = 10
+        while attempts > 0:
+            pos = Point(
+                randint(0, self.GRID_WIDTH - 1),
+                randint(0, self.GRID_HEIGHT - 1)
+            )
+            
+            if self.is_cell_free(pos):
+                temp_obstacles = self.obstacles.copy()
+                temp_obstacles.add(pos)
+                
+                if self._check_path_with_temp_obstacles(temp_obstacles):
+                    self.obstacles.add(pos)
+                    return True
+                    
+            attempts -= 1
+        return False
+        
+    def _check_path_with_temp_obstacles(self, temp_obstacles: Set[Point]) -> bool:
+        """Check if snake can reach food with temporary obstacles."""
+        if not self.food:
+            return True
+            
+        # Save current obstacles
+        original_obstacles = self.obstacles
+        self.obstacles = temp_obstacles
+        
+        # Check path
+        has_path = self.bfs_reachable(self.snake[0], self.food.pos)
+        
+        # Restore original obstacles
+        self.obstacles = original_obstacles
+        
+        return has_path
 
     def draw(self):
         """
         Render the current game state to the canvas.
         
-        This method handles the complete rendering pipeline:
-        
-        Rendering Order (back to front):
-        1. Clear previous frame (prevent ghosting)
-        2. Draw food (red circle)
-        3. Draw snake (green segments, darker head)
-        4. Draw game over overlay (if needed)
-        
-        Visual Design:
-        - Background: Dark blue-gray (#2C3E50) for reduced eye strain
-        - Snake Body: Bright green (#2ECC71) for high visibility
-        - Snake Head: Darker green (#27AE60) to distinguish direction
-        - Food: Red circle (#E74C3C) for contrast against snake
-        - Text: Light gray (#ECF0F1) for readability
-        
-        Performance Considerations:
-        - No borders on shapes (width=0) reduces render time
-        - Single canvas.delete("all") is faster than individual updates
-        - Minimal overlap between elements reduces overdraw
-        - Grid-based positioning eliminates sub-pixel rendering
-        
-        Accessibility Features:
-        - High contrast color scheme
-        - Clear visual hierarchy
-        - Large, readable text
-        - Distinct game elements
+        Features:
+        1. Score-based snake coloring
+        2. Special food types with distinct colors
+        3. Obstacles
+        4. Game over overlay
         """
-        # Clear previous frame to prevent visual artifacts
+        # Clear previous frame
         self.canvas.delete("all")
         
-        # Draw food as a circle (if it exists)
+        # Draw obstacles
+        for pos in self.obstacles:
+            x1 = pos.x * self.CELL_SIZE
+            y1 = pos.y * self.CELL_SIZE
+            self.canvas.create_rectangle(
+                x1, y1,
+                x1 + self.CELL_SIZE,
+                y1 + self.CELL_SIZE,
+                fill=self.OBSTACLE_COLOR,
+                width=0
+            )
+        
+        # Draw food
         if self.food:
-            # Convert grid coordinates to pixel coordinates
-            x1 = self.food.x * self.CELL_SIZE  # Left edge
-            y1 = self.food.y * self.CELL_SIZE  # Top edge
+            x1 = self.food.pos.x * self.CELL_SIZE
+            y1 = self.food.pos.y * self.CELL_SIZE
             self.canvas.create_oval(
-                x1, y1,                        # Top-left corner
-                x1 + self.CELL_SIZE,          # Right edge
-                y1 + self.CELL_SIZE,          # Bottom edge
-                fill=self.FOOD_COLOR,         # Bright red
-                width=0                        # No border for clean look
+                x1, y1,
+                x1 + self.CELL_SIZE,
+                y1 + self.CELL_SIZE,
+                fill=self.food.color,
+                width=0
             )
+            
+            # Optional: Draw indicator for special food
+            if self.food.type == FoodType.GOLDEN:
+                # Draw a small star/crown
+                center_x = x1 + self.CELL_SIZE // 2
+                center_y = y1 + self.CELL_SIZE // 4
+                size = self.CELL_SIZE // 4
+                self.canvas.create_text(
+                    center_x, center_y,
+                    text="★",
+                    fill="#ffffff",
+                    font=("TkDefaultFont", size)
+                )
+            elif self.food.type == FoodType.ROTTEN:
+                # Draw an X
+                center_x = x1 + self.CELL_SIZE // 2
+                center_y = y1 + self.CELL_SIZE // 4
+                size = self.CELL_SIZE // 4
+                self.canvas.create_text(
+                    center_x, center_y,
+                    text="×",
+                    fill="#ffffff",
+                    font=("TkDefaultFont", size)
+                )
 
-        # Draw snake segments (body + head)
+        # Draw snake with score-based color
+        snake_color = self.snake_color_for_score()
+        head_color = snake_color  # Could make slightly darker if desired
+        
         for i, point in enumerate(self.snake):
-            # Convert grid coordinates to pixel coordinates
-            x1 = point.x * self.CELL_SIZE     # Left edge
-            y1 = point.y * self.CELL_SIZE     # Top edge
+            x1 = point.x * self.CELL_SIZE
+            y1 = point.y * self.CELL_SIZE
+            color = head_color if i == 0 else snake_color
             
-            # Head (i=0) gets darker color for visual distinction
-            color = self.SNAKE_HEAD_COLOR if i == 0 else self.SNAKE_COLOR
-            
-            # Draw segment as filled rectangle
             self.canvas.create_rectangle(
-                x1, y1,                        # Top-left corner
-                x1 + self.CELL_SIZE,          # Right edge
-                y1 + self.CELL_SIZE,          # Bottom edge
-                fill=color,                    # Green (dark for head)
-                width=0                        # No border for clean look
+                x1, y1,
+                x1 + self.CELL_SIZE,
+                y1 + self.CELL_SIZE,
+                fill=color,
+                width=0
             )
 
-        # Draw game over overlay when game has ended
+        # Draw game over overlay
         if self.game_over_flag:
-            # Create semi-transparent dark overlay for contrast
             self.canvas.create_rectangle(
-                0, 0,                                    # Top-left corner
-                self.GRID_WIDTH * self.CELL_SIZE,       # Full width
-                self.GRID_HEIGHT * self.CELL_SIZE,      # Full height
-                fill=self.BG_COLOR,                     # Dark background
-                stipple="gray50"                        # 50% transparency
+                0, 0,
+                self.GRID_WIDTH * self.CELL_SIZE,
+                self.GRID_HEIGHT * self.CELL_SIZE,
+                fill=self.BG_COLOR,
+                stipple="gray50"
             )
             
-            # Display game over message and final score
             self.canvas.create_text(
-                self.GRID_WIDTH * self.CELL_SIZE // 2,  # Center horizontally
-                self.GRID_HEIGHT * self.CELL_SIZE // 2 - 30,  # Above center
+                self.GRID_WIDTH * self.CELL_SIZE // 2,
+                self.GRID_HEIGHT * self.CELL_SIZE // 2 - 30,
                 text=f"Game Over! Score: {self.score}",
-                fill=self.TEXT_COLOR,                   # Light gray
-                font=("TkDefaultFont", 24)              # Large, bold font
+                fill=self.TEXT_COLOR,
+                font=("TkDefaultFont", 24)
             )
             
-            # Show restart instructions below score
             self.canvas.create_text(
-                self.GRID_WIDTH * self.CELL_SIZE // 2,  # Center horizontally
-                self.GRID_HEIGHT * self.CELL_SIZE // 2 + 30,  # Below center
+                self.GRID_WIDTH * self.CELL_SIZE // 2,
+                self.GRID_HEIGHT * self.CELL_SIZE // 2 + 30,
                 text="Press R to restart",
-                fill=self.TEXT_COLOR,                   # Light gray
-                font=("TkDefaultFont", 16)              # Smaller font
+                fill=self.TEXT_COLOR,
+                font=("TkDefaultFont", 16)
             )
 
     def game_loop(self):
         """
         Main game loop that drives the game.
         
-        This is the heart of the game, responsible for:
-        1. Game State Management:
-           - Checking if game is active
-           - Moving snake
-           - Detecting collisions
-           - Handling game over
-        
-        2. Rendering:
-           - Updating display after each move
-           - Drawing game over screen when needed
-        
-        3. Timing Control:
-           - Runs every game_speed milliseconds
-           - Speed progression: 150ms → 50ms
-           - Faster updates as score increases
-        
-        The loop uses Tkinter's after() method for timing,
-        which provides smoother animation than a while loop
-        and properly integrates with the Tkinter event system.
-        
-        Game Speed Progression:
-        - Start: 150ms between frames
-        - Each food: -2ms speed increase
-        - Minimum: 50ms (maximum speed cap)
+        Features:
+        1. Moving food
+        2. Progressive speed scaling
+        3. Collision detection
+        4. Score-based coloring
         """
         if not self.game_over_flag:
-            if self.move_snake():  # Try to move snake (False = collision)
-                self.draw()        # Update display with new positions
-                # Schedule next frame using dynamic game speed
+            # Update tick counter
+            self.tick_count += 1
+            
+            # Try to move food
+            self.try_move_food()
+            
+            # Move snake
+            if self.move_snake():
+                self.draw()
+                # Schedule next frame
                 self.root.after(self.game_speed, self.game_loop)
             else:
-                self.game_over()   # Handle collision and end game
+                self.game_over()
 
     def game_over(self):
-        """
-        Handle the game over state.
+        """Handle game over state."""
+        self.game_over_flag = True
+        self.draw()
+
+    def reset_game(self):
+        """Reset game to initial state."""
+        # Reset snake
+        self.snake = [Point(self.GRID_WIDTH // 4, self.GRID_HEIGHT // 2)]
+        self.direction = Point(1, 0)
+        self.next_direction = Point(1, 0)
         
-        This method manages the end-game sequence:
+        # Reset game state
+        self.score = 0
+        self.foods_eaten = 0
+        self.tick_count = 0
+        self.game_speed = GAME_TUNING["speed_base"]
+        self.game_over_flag = False
+        self.obstacles.clear()
         
-        1. State Changes:
-           - Sets game over flag to stop main loop
-           - Preserves final score and snake position
-           - Stops snake movement
+        # Update score display
+        self.score_var.set(f"Score: {self.score}")
         
-        2. Visual Feedback:
-           - Triggers game over screen drawing
-           - Shows final score
-           - Displays restart instructions
+        # Clear and redraw
+        self.canvas.delete("all")
+        self.spawn_food()
+        self.draw()
         
-        3. Player Options:
-           - Can restart with R key (case insensitive)
-           - Can close window to quit
-           - Score is preserved until restart
-        
-        The game over state remains until player either:
-        - Restarts game with R key
-        - Closes the window
-        """
-        self.game_over_flag = True  # Stop game loop
-        self.draw()  # Show game over screen with score
+        # Start game loop
+        self.root.after(self.game_speed, self.game_loop)
 
     def on_keypress(self, dx: int, dy: int):
-        """
-        Handle keyboard input for direction changes.
-        
-        This method implements the game's control system:
-        
-        Input Handling:
-        - Captures arrow keys and WASD
-        - Converts key presses to direction vectors
-        - Buffers next direction change
-        
-        Direction Vector:
-        dx: Horizontal movement
-            -1 = Left
-             0 = No horizontal change
-             1 = Right
-        
-        dy: Vertical movement
-            -1 = Up
-             0 = No vertical change
-             1 = Down
-        
-        Safety Features:
-        - Direction change isn't instant (prevents multiple turns per frame)
-        - 180° turns are blocked in move_snake()
-        - Invalid combinations are ignored
-        
-        Note: Changes take effect on next game tick for smooth,
-        consistent movement and to prevent rapid direction changes
-        that could cause instant game over.
-        """
-        self.next_direction = Point(dx, dy)  # Buffer next direction change
+        """Handle keyboard input for direction changes."""
+        self.next_direction = Point(dx, dy)
 
     def run(self):
-        """
-        Start the game and enter the main event loop.
-        
-        This method initializes the game and starts Tkinter's
-        event processing loop. It handles:
-        
-        1. Game Initialization:
-           - Window creation and setup
-           - Initial game state
-           - First food spawn
-        
-        2. Event Processing:
-           - Keyboard input
-           - Window events
-           - Timer events (game loop)
-        
-        3. Game Flow:
-           - Continuous updates
-           - Score tracking
-           - Game over detection
-        
-        The game runs until the window is closed. The mainloop()
-        call blocks until then, handling all game events and
-        updates in the background.
-        """
-        self.root.mainloop()  # Start Tkinter event loop
+        """Start the game."""
+        self.root.mainloop()
 
 
 if __name__ == "__main__":
